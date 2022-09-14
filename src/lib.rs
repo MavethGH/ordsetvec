@@ -5,11 +5,55 @@ use std::ops::Deref;
 use thiserror::Error;
 
 /// Must be implemented by all types in an `OrdSetVec`
-/// Implemented for all types that are Ord
+/// Implemented for all types that are Ord, but implementors
+/// do not need to be Ord, since they can also be compared
+/// using a Key.
+///
+/// # Examples
+///
+/// Comparing by value:
+/// ```
+/// #[derive(PartialEq, Eq, PartialOrd, Ord)]
+/// struct Item(u32);
+///
+/// impl OrdSetItemTrait for Item {
+///     type Key = Item;
+///
+///     fn compare(a: &Self, b: &Self) -> Ordering {
+///         a.cmp(b)
+///     }
+///
+///     fn compare_key(a: &Self, b: &Self::Key) -> Ordering {
+///         a.cmp(b)
+///     }
+/// }
+/// ```
+///
+/// Comparing by Key:
+/// ```
+/// struct Item {
+///     // The key used for comparisons
+///     pub key: u32,
+///     //Something that is expensive or inconvenient to compare to itself
+///     data: Vec<String>,
+/// }
+///
+/// impl OrdSetItemTrait for Item {
+///     type Key = u32;
+///
+///     fn compare(a: &Self, b: &Self) -> Ordering {
+///         a.key.cmp(&b.key)
+///     }
+///
+///     fn compare_key(a: &Self, b: &Self::Key) -> Ordering {
+///         a.key.cmp(b)
+///     }
+/// }
+/// ```
 pub trait OrdSetItemTrait {
     type Key;
     fn compare(a: &Self, b: &Self) -> Ordering;
-    fn compare_to(a: &Self, b: &Self::Key) -> Ordering;
+    fn compare_key(a: &Self, b: &Self::Key) -> Ordering;
 }
 
 impl<T: Ord> OrdSetItemTrait for T {
@@ -19,7 +63,7 @@ impl<T: Ord> OrdSetItemTrait for T {
         a.cmp(b)
     }
 
-    fn compare_to(a: &Self, b: &Self::Key) -> Ordering {
+    fn compare_key(a: &Self, b: &Self::Key) -> Ordering {
         a.cmp(b)
     }
 }
@@ -173,7 +217,7 @@ impl<T: OrdSetItemTrait> OrdSetVec<T> {
             .dedup_by(|a, b| T::compare(a, b) == Ordering::Equal);
     }
 
-    /// Return the index of item in this `OrdSetVec` if it exists, by binary search.
+    /// Return the index of an item in this `OrdSetVec` if it exists, by binary search.
     ///
     /// See [`slice::binary_search()`] for more details.
     pub fn binary_search_item(&self, item: &T) -> std::result::Result<usize, usize> {
@@ -187,9 +231,12 @@ impl<T: OrdSetItemTrait> OrdSetVec<T> {
         self.binary_search_item(item).is_ok()
     }
 
-    /// Returns the index of key in this `OrdSetVec` if it exists
+    /// Returns the index of a key in this `OrdSetVec` if it exists, by binary search.
+    ///
+    /// See [`slice::binary_search_by()`] for details on the binary search, and [`OrdSetItemTrait`]
+    /// for details on comparing by key.
     pub fn binary_search_key(&self, key: &T::Key) -> std::result::Result<usize, usize> {
-        self.inner.binary_search_by(|e| T::compare_to(e, key))
+        self.inner.binary_search_by(|e| T::compare_key(e, key))
     }
 
     fn find_dup(slice: &[T]) -> Option<usize> {
