@@ -224,7 +224,7 @@ impl<T: OrdSetItemTrait> OrdSetVec<T> {
         self.inner.binary_search_by(|e| T::compare(e, item))
     }
 
-    /// Returns true if the item exists in the is `OrdSetVec`, and false if it doesn't.
+    /// Returns true if the item exists in this `OrdSetVec`, and false if it doesn't.
     ///
     /// Uses [`Self::binary_search_item()`] internally.
     pub fn contains_item(&self, item: &T) -> bool {
@@ -237,6 +237,45 @@ impl<T: OrdSetItemTrait> OrdSetVec<T> {
     /// for details on comparing by key.
     pub fn binary_search_key(&self, key: &T::Key) -> std::result::Result<usize, usize> {
         self.inner.binary_search_by(|e| T::compare_key(e, key))
+    }
+
+    /// Returns true if the key exists in this set, and false if it doesn't/
+    ///
+    /// uses [`Self::binary_search_key()`] internally.
+    pub fn contains_key(&self, key: &T::Key) -> bool {
+        self.binary_search_key(key).is_ok()
+    }
+
+    /// See [`Vec::len()`].
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// See [`Vec::is_empty()`].
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// See [`Vec::as_slice()`]
+    #[inline]
+    pub fn as_slice(&self) -> &[T] {
+        self
+    }
+
+    /// Inserts an item into the `OrdSetVec`.
+    ///
+    /// Uses binary search to find the index to insert at, and returns that
+    /// index if successful. Uses [`Vec::insert()`], which can be very slow
+    /// when the size of the vector in bytes is large.
+    ///
+    /// Returns an error if the item is already present.
+    pub fn insert(&mut self, item: T) -> Result<usize> {
+        let index = match self.binary_search_item(&item) {
+            Ok(_) => return Err(VerificationError::DuplicateData),
+            Err(index) => index,
+        };
+        self.inner.insert(index, item);
+        Ok(index)
     }
 
     fn find_dup(slice: &[T]) -> Option<usize> {
