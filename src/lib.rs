@@ -1,5 +1,10 @@
 use iter_set::{classify_by, ClassifyBy};
-use std::{iter::Peekable, ops::Deref};
+use serde::{
+    de::{Error, Visitor},
+    ser::SerializeSeq,
+    Deserialize, Serialize,
+};
+use std::{iter::Peekable, marker::PhantomData, ops::Deref};
 use thiserror::Error;
 
 pub use iter_set::Inclusion;
@@ -106,6 +111,65 @@ impl<T: OrdSetItemTrait> Deref for OrdSetVec<T> {
         &self.inner
     }
 }
+
+impl<T: OrdSetItemTrait> std::fmt::Debug for OrdSetVec<T>
+where
+    T: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.inner.iter()).finish()
+    }
+}
+
+impl<T: OrdSetItemTrait> Serialize for OrdSetVec<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.inner.len()))?;
+        for e in &self.inner {
+            seq.serialize_element(e)?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de, T: OrdSetItemTrait> Deserialize<'de> for OrdSetVec<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(OrdSetVecVisitor::new())
+    }
+}
+
+impl<T: OrdSetItemTrait> Clone for OrdSetVec<T>
+where
+    T: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T> PartialEq for OrdSetVec<T>
+where
+    T: OrdSetItemTrait + Eq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl<T> Eq for OrdSetVec<T> where T: Eq + Ord {}
 
 impl<T: OrdSetItemTrait> OrdSetVec<T> {
     /// Creates a new, empty `OrdSetVec`
@@ -422,18 +486,22 @@ impl<T: OrdSetItemTrait> OrdSetVec<T> {
 
 /// Indicates that an iterator is ordered and de-duplicated.
 /// Does not perform any checking by itself.
-pub trait OrdSetIter<T: OrdSetItemTrait>: Iterator<Item = T> {
+pub trait OrdSetIter<T: OrdSetItemTrait>: Iterator {
     /// Iterate over the union of this set and another that has no duplicates
     /// with this set.
     fn union_set<B>(self, other: B) -> UnionIter<T, Self, B>
     where
+        Self: Sized + Iterator<Item = T>,
         B: OrdSetIter<T> + Iterator<Item = T>,
     {
         UnionIter::new(self, other)
     }
 
     /// Collect this set into an [`OrdSetVec`].
-    fn collect_set(self) -> OrdSetVec<<Self as Iterator>::Item> {
+    fn collect_set(self) -> OrdSetVec<<Self as Iterator>::Item>
+    where
+        Self: Sized + Iterator<Item = T>,
+    {
         OrdSetVec {
             inner: Iterator::collect(self),
         }
@@ -443,8 +511,10 @@ pub trait OrdSetIter<T: OrdSetItemTrait>: Iterator<Item = T> {
     /// sorted and deduplicated.
     fn map_and_verify<F>(self, f: F) -> OrdSetIterVerify<T, std::iter::Map<Self, F>>
     where
+        Self: Sized,
         F: FnMut(Self::Item) -> T,
     {
+        OrdSetIterVerify::new(Iterator::map(self, f))
     }
 }
 
@@ -499,7 +569,7 @@ where
     }
 }
 
-impl<T, A, B> OrdSetIter for UnionIter<T, A, B>
+impl<T, A, B> OrdSetIter<T> for UnionIter<T, A, B>
 where
     T: OrdSetItemTrait,
     A: OrdSetIter<T> + Iterator<Item = T>,
@@ -507,6 +577,36 @@ where
 {
 }
 
+/// OrdSetIterVerify takes what is believed to be an ordered and de-duplicated
+/// iterator and verifies it during iteration.
+///
+/// This is an entry point for external data that is expected to conform to the
+/// expectations of [`OrdSetVec`]. Verification is performed lazily, so if the
+/// data does not conform, the iterator will panic when it encounters bad data,
+/// to prevent silent and hard-to-track logic bugs.
+///
+/// If you can't be sure that your data has no duplicates and is sorted, you should
+/// avoid using this struct, and instead use one of the constructor methods on
+/// `OrdSetVec`.
+///
+/// If you are completely confident that your data conforms, and you are writing
+/// very performance-critical code, it *might* be better to avoid using this struct
+/// and the methods that construct it ([`OrdSetIter::map_and_verify()`]).
+///
+/// # Panic
+///
+/// If an element is encountered that is not greater than the previous element,
+/// the iterator will panic.
+///
+/// # Examples
+///
+/// ```
+/// let unverified: Vec<u32> = vec![4, 5, 6];
+/// let verify = OrdSetIterVerify::new(unverified.into_iter());
+/// let extracted: Vec<u32> = verify.collect();
+///
+/// assert_eq!(extracted, vec![4, 5, 6]);
+/// ```
 pub struct OrdSetIterVerify<T, I>
 where
     T: OrdSetItemTrait,
@@ -548,9 +648,139 @@ where
     }
 }
 
-impl<T, I> OrdSetIter for OrdSetIterVerify<T, I>
+impl<T, I> OrdSetIter<T> for OrdSetIterVerify<T, I>
 where
     T: OrdSetItemTrait,
     I: Iterator<Item = T>,
 {
+}
+
+/// Iterator over a set already verified to be ordered and de-duplicated.
+///
+/// Can only be constructed internally.
+pub struct SetIterWrapper<T, I>
+where
+    T: OrdSetItemTrait,
+    I: Iterator<Item = T>,
+{
+    i: I,
+}
+
+impl<T, I> Iterator for SetIterWrapper<T, I>
+where
+    T: OrdSetItemTrait,
+    I: Iterator<Item = T>,
+{
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.i.next()
+    }
+}
+
+/// Iterator over items in an [`OrdSetVec`]
+pub struct OrdSetVecIter<'a, T>
+where
+    T: OrdSetItemTrait,
+{
+    inner: &'a OrdSetVec<T>,
+    pos: usize,
+    end: usize,
+}
+
+impl<'a, T> Iterator for OrdSetVecIter<'a, T>
+where
+    T: OrdSetItemTrait,
+{
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos == self.end {
+            return None;
+        }
+        let item = &self.inner.inner[self.pos];
+        self.pos += 1;
+        Some(item)
+    }
+}
+
+impl<'a, T> DoubleEndedIterator for OrdSetVecIter<'a, T>
+where
+    T: OrdSetItemTrait,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.pos == self.end || self.end == 0 {
+            return None;
+        }
+        self.end -= 1;
+        let item = &self.inner.inner[self.end];
+        Some(item)
+    }
+}
+
+impl<'a, T> OrdSetIter<T> for OrdSetVecIter<'a, T> where T: OrdSetItemTrait {}
+
+/// Draining iterator over the items in an [`OrdSetVec`]. Constructed by
+/// [`OrdSetVec::drain()`].
+pub struct OrdSetVecDrain<'a, T>
+where
+    T: OrdSetItemTrait,
+{
+    i: std::vec::Drain<'a, T>,
+}
+
+impl<'a, T> Iterator for OrdSetVecDrain<'a, T>
+where
+    T: OrdSetItemTrait,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.i.next()
+    }
+}
+
+impl<'a, T> OrdSetIter<T> for OrdSetVecDrain<'a, T> where T: OrdSetItemTrait {}
+
+struct OrdSetVecVisitor<T>
+where
+    T: OrdSetItemTrait,
+{
+    marker: PhantomData<fn() -> OrdSetVec<T>>,
+}
+
+impl<T: OrdSetItemTrait> OrdSetVecVisitor<T> {
+    fn new() -> Self {
+        Self {
+            marker: PhantomData,
+        }
+    }
+}
+impl<'de, T> Visitor<'de> for OrdSetVecVisitor<T>
+where
+    T: OrdSetItemTrait + Deserialize<'de>,
+{
+    type Value = OrdSetVec<T>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("an OrdSetVec<T>")
+    }
+
+    fn visit_seq<A>(self, mut access: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut osv = OrdSetVec::with_capacity(access.size_hint().unwrap_or(0));
+        while let Some(value) = access.next_element()? {
+            match osv.push(value) {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(<A as serde::de::SeqAccess<'de>>::Error::custom(
+                        e.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(osv)
+    }
 }
