@@ -1,9 +1,9 @@
-pub use iter_set::Inclusion;
 use iter_set::{classify_by, ClassifyBy};
-pub use std::cmp::Ordering;
-use std::ops::Deref;
-
+use std::{iter::Peekable, ops::Deref};
 use thiserror::Error;
+
+pub use iter_set::Inclusion;
+pub use std::cmp::Ordering;
 
 /// Must be implemented by all types in an `OrdSetVec`
 /// Implemented for all types that are Ord, but implementors
@@ -418,4 +418,139 @@ impl<T: OrdSetItemTrait> OrdSetVec<T> {
         }
         None
     }
+}
+
+/// Indicates that an iterator is ordered and de-duplicated.
+/// Does not perform any checking by itself.
+pub trait OrdSetIter<T: OrdSetItemTrait>: Iterator<Item = T> {
+    /// Iterate over the union of this set and another that has no duplicates
+    /// with this set.
+    fn union_set<B>(self, other: B) -> UnionIter<T, Self, B>
+    where
+        B: OrdSetIter<T> + Iterator<Item = T>,
+    {
+        UnionIter::new(self, other)
+    }
+
+    /// Collect this set into an [`OrdSetVec`].
+    fn collect_set(self) -> OrdSetVec<<Self as Iterator>::Item> {
+        OrdSetVec {
+            inner: Iterator::collect(self),
+        }
+    }
+
+    /// Same as [`Iterator::map()`], but verifies that the resulting iterator is
+    /// sorted and deduplicated.
+    fn map_and_verify<F>(self, f: F) -> OrdSetIterVerify<T, std::iter::Map<Self, F>>
+    where
+        F: FnMut(Self::Item) -> T,
+    {
+    }
+}
+
+/// Iterator over the union of two [`OrdSetIter`]s that have no duplicates
+/// between them
+pub struct UnionIter<T, A, B>
+where
+    T: OrdSetItemTrait,
+    A: OrdSetIter<T> + Iterator<Item = T>,
+    B: OrdSetIter<T> + Iterator<Item = T>,
+{
+    a: Peekable<A>,
+    b: Peekable<B>,
+}
+
+impl<T, A, B> UnionIter<T, A, B>
+where
+    T: OrdSetItemTrait,
+    A: OrdSetIter<T> + Iterator<Item = T>,
+    B: OrdSetIter<T> + Iterator<Item = T>,
+{
+    pub fn new(a: A, b: B) -> Self {
+        Self {
+            a: a.peekable(),
+            b: b.peekable(),
+        }
+    }
+}
+
+impl<T, A, B> Iterator for UnionIter<T, A, B>
+where
+    T: OrdSetItemTrait,
+    A: OrdSetIter<T> + Iterator<Item = T>,
+    B: OrdSetIter<T> + Iterator<Item = T>,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let a = match self.a.peek() {
+            None => return self.b.next(),
+            Some(v) => v,
+        };
+        let b = match self.b.peek() {
+            None => return self.a.next(),
+            Some(v) => v,
+        };
+        match T::compare(a, b) {
+            Ordering::Less => self.a.next(),
+            Ordering::Greater => self.b.next(),
+            Ordering::Equal => panic!("duplicate items in union"),
+        }
+    }
+}
+
+impl<T, A, B> OrdSetIter for UnionIter<T, A, B>
+where
+    T: OrdSetItemTrait,
+    A: OrdSetIter<T> + Iterator<Item = T>,
+    B: OrdSetIter<T> + Iterator<Item = T>,
+{
+}
+
+pub struct OrdSetIterVerify<T, I>
+where
+    T: OrdSetItemTrait,
+    I: Iterator<Item = T>,
+{
+    i: Peekable<I>,
+}
+
+impl<T, I> OrdSetIterVerify<T, I>
+where
+    T: OrdSetItemTrait,
+    I: Iterator<Item = T>,
+{
+    pub fn new(i: I) -> Self {
+        Self { i: i.peekable() }
+    }
+}
+
+impl<T, I> Iterator for OrdSetIterVerify<T, I>
+where
+    T: OrdSetItemTrait,
+    I: Iterator<Item = T>,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = match self.i.next() {
+            None => return None,
+            Some(v) => v,
+        };
+        let peek = match self.i.peek() {
+            None => return Some(item),
+            Some(v) => v,
+        };
+        if T::compare(&item, &peek) != Ordering::Less {
+            panic!("Unordered or duplicate data");
+        }
+        Some(item)
+    }
+}
+
+impl<T, I> OrdSetIter for OrdSetIterVerify<T, I>
+where
+    T: OrdSetItemTrait,
+    I: Iterator<Item = T>,
+{
 }
